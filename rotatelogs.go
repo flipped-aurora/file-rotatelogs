@@ -102,21 +102,52 @@ func New(p string, options ...Option) (*RotateLogs, error) {
 // appropriate file handle that is currently being used.
 // If we have reached rotation time, the target file gets
 // automatically rotated, and also purged if necessary.
-func (rl *RotateLogs) Write(p []byte) (n int, err error) {
+func (rl *RotateLogs) Write(bytes []byte) (n int, err error) {
 	// Guard against concurrent writes
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
+	var out io.Writer
+	if strings.Contains(string(bytes), "business") {
+		compile := regexp.MustCompile(`{"business": "([^,]+)"}`)
+		business := compile.FindStringSubmatch(string(bytes))
+		if len(business) == 2 {
+			data := string(bytes)
+			data = compile.ReplaceAllString(data, "")
+			out, err = rl.getWriterNolock(false, false, business[1])
+			if err != nil {
+				return 0, err
+			}
+			return out.Write([]byte(data))
+		} else {
+			compile = regexp.MustCompile(`"business": "([^,]+)"`)
+			business = compile.FindStringSubmatch(string(bytes))
+			if len(business) == 2 {
+				data := string(bytes)
+				data = compile.ReplaceAllString(data, "")
+				out, err = rl.getWriterNolock(false, false, business[1])
+				if err != nil {
+					return 0, err
+				}
+				return out.Write([]byte(data))
+			}
+		}
+	}
 
-	out, err := rl.getWriterNolock(false, false)
+	out, err = rl.getWriterNolock(false, false, "")
 	if err != nil {
 		return 0, errors.Wrap(err, `failed to acquite target io.Writer`)
 	}
 
-	return out.Write(p)
+	return out.Write(bytes)
 }
 
 // must be locked during this operation
-func (rl *RotateLogs) getWriterNolock(bailOnRotateFail, useGenerationalNames bool) (io.Writer, error) {
+func (rl *RotateLogs) getWriterNolock(bailOnRotateFail, useGenerationalNames bool, business string) (io.Writer, error) {
+	if business != "" {
+		slice := strings.Split(rl.pattern.Pattern(), "/")
+		slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
+		rl.pattern, _ = strftime.New(strings.Join(slice, "/"))
+	}
 	generation := rl.generation
 	previousFn := rl.curFn
 
@@ -248,7 +279,7 @@ func (g *cleanupGuard) Run() {
 func (rl *RotateLogs) Rotate() error {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	_, err := rl.getWriterNolock(true, true)
+	_, err := rl.getWriterNolock(true, true, "")
 
 	return err
 }
