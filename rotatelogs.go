@@ -145,8 +145,10 @@ func (rl *RotateLogs) Write(bytes []byte) (n int, err error) {
 func (rl *RotateLogs) getWriterNolock(bailOnRotateFail, useGenerationalNames bool, business string) (io.Writer, error) {
 	if business != "" {
 		slice := strings.Split(rl.pattern.Pattern(), "/")
-		slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
-		rl.pattern, _ = strftime.New(strings.Join(slice, "/"))
+		if slice[len(slice)-2] != business {
+			slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
+			rl.pattern, _ = strftime.New(strings.Join(slice, "/"))
+		}
 	}
 	generation := rl.generation
 	previousFn := rl.curFn
