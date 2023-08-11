@@ -1,4 +1,4 @@
-// package rotatelogs is a port of File-RotateLogs from Perl
+// package rotatelogs is a port of File-Rotate from Perl
 // (https://metacpan.org/release/File-RotateLogs), and it allows
 // you to automatically rotate output files when you write to them
 // according to the filename pattern that you can specify.
@@ -23,86 +23,39 @@ func (c clockFn) Now() time.Time {
 	return c()
 }
 
-// New creates a new RotateLogs object. A log filename pattern
+// New creates a new Rotate object. A log filename pattern
 // must be passed. Optional `Option` parameters may be passed
-func New(p string, options ...Option) (*RotateLogs, error) {
-	globPattern := p
-	for _, re := range patternConversionRegexps {
-		globPattern = re.ReplaceAllString(globPattern, "*")
-	}
-
+func New(p string, options ...Option) (*Rotate, error) {
 	pattern, err := strftime.New(p)
 	if err != nil {
 		return nil, errors.Wrap(err, `invalid strftime pattern`)
 	}
-
-	var clock Clock = Local
-	rotationTime := 24 * time.Hour
-	var rotationSize int64
-	var rotationCount uint
-	var linkName string
-	var maxAge time.Duration
-	var handler Handler
-	var forceNewFile bool
-
-	for _, o := range options {
-		switch o.Name() {
-		case optkeyClock:
-			clock = o.Value().(Clock)
-		case optkeyLinkName:
-			linkName = o.Value().(string)
-		case optkeyMaxAge:
-			maxAge = o.Value().(time.Duration)
-			if maxAge < 0 {
-				maxAge = 0
-			}
-		case optkeyRotationTime:
-			rotationTime = o.Value().(time.Duration)
-			if rotationTime < 0 {
-				rotationTime = 0
-			}
-		case optkeyRotationSize:
-			rotationSize = o.Value().(int64)
-			if rotationSize < 0 {
-				rotationSize = 0
-			}
-		case optkeyRotationCount:
-			rotationCount = o.Value().(uint)
-		case optkeyHandler:
-			handler = o.Value().(Handler)
-		case optkeyForceNewFile:
-			forceNewFile = true
-		}
+	rotate := &Rotate{
+		clock:        Local,
+		mutex:        new(sync.RWMutex),
+		pattern:      pattern,
+		rotationTime: 24 * time.Hour,
 	}
-
-	if maxAge > 0 && rotationCount > 0 {
+	for i := 0; i < len(options); i++ {
+		options[i](rotate)
+	}
+	for i := 0; i < len(patternConversionRegexps); i++ {
+		rotate.globPattern = patternConversionRegexps[i].ReplaceAllString(rotate.globPattern, "*")
+	}
+	if rotate.maxAge > 0 && rotate.rotationCount > 0 {
 		return nil, errors.New("options MaxAge and RotationCount cannot be both set")
 	}
-
-	if maxAge == 0 && rotationCount == 0 {
-		// if both are 0, give maxAge a sane default
-		maxAge = 7 * 24 * time.Hour
-	}
-
-	return &RotateLogs{
-		clock:         clock,
-		eventHandler:  handler,
-		globPattern:   globPattern,
-		linkName:      linkName,
-		maxAge:        maxAge,
-		pattern:       pattern,
-		rotationTime:  rotationTime,
-		rotationSize:  rotationSize,
-		rotationCount: rotationCount,
-		forceNewFile:  forceNewFile,
-	}, nil
+	if rotate.maxAge == 0 && rotate.rotationCount == 0 {
+		rotate.maxAge = 7 * 24 * time.Hour
+	} // if both are 0, give maxAge a sane default
+	return rotate, nil
 }
 
 // Write satisfies the io.Writer interface. It writes to the
 // appropriate file handle that is currently being used.
 // If we have reached rotation time, the target file gets
 // automatically rotated, and also purged if necessary.
-func (rl *RotateLogs) Write(bytes []byte) (n int, err error) {
+func (rl *Rotate) Write(bytes []byte) (n int, err error) {
 	// Guard against concurrent writes
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
@@ -142,7 +95,7 @@ func (rl *RotateLogs) Write(bytes []byte) (n int, err error) {
 }
 
 // must be locked during this operation
-func (rl *RotateLogs) getWriterNolock(bailOnRotateFail, useGenerationalNames bool, business string) (io.Writer, error) {
+func (rl *Rotate) getWriterNolock(bailOnRotateFail, useGenerationalNames bool, business string) (io.Writer, error) {
 	if business != "" {
 		slice := strings.Split(rl.pattern.Pattern(), "/")
 		if slice[len(slice)-2] != business {
@@ -242,11 +195,10 @@ func (rl *RotateLogs) getWriterNolock(bailOnRotateFail, useGenerationalNames boo
 }
 
 // CurrentFileName returns the current file name that
-// the RotateLogs object is writing to
-func (rl *RotateLogs) CurrentFileName() string {
+// the Rotate object is writing to
+func (rl *Rotate) CurrentFileName() string {
 	rl.mutex.RLock()
 	defer rl.mutex.RUnlock()
-
 	return rl.curFn
 }
 
@@ -278,17 +230,16 @@ func (g *cleanupGuard) Run() {
 // Thie method can be used in conjunction with a signal handler so to
 // emulate servers that generate new log files when they receive a
 // SIGHUP
-func (rl *RotateLogs) Rotate() error {
+func (rl *Rotate) Rotate() error {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 	_, err := rl.getWriterNolock(true, true, "")
-
 	return err
 }
 
-func (rl *RotateLogs) rotateNolock(filename string) error {
-	lockfn := filename + `_lock`
-	fh, err := os.OpenFile(lockfn, os.O_CREATE|os.O_EXCL, 0644)
+func (rl *Rotate) rotateNolock(filename string) error {
+	lock := filename + `_lock`
+	fh, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		// Can't lock, just return
 		return err
@@ -296,8 +247,8 @@ func (rl *RotateLogs) rotateNolock(filename string) error {
 
 	var guard cleanupGuard
 	guard.fn = func() {
-		fh.Close()
-		os.Remove(lockfn)
+		_ = fh.Close()
+		_ = os.Remove(lock)
 	}
 	defer guard.Run()
 
@@ -321,14 +272,16 @@ func (rl *RotateLogs) rotateNolock(filename string) error {
 			linkDest = tmp
 		}
 
-		if err := os.Symlink(linkDest, tmpLinkName); err != nil {
+		err = os.Symlink(linkDest, tmpLinkName)
+		if err != nil {
 			return errors.Wrap(err, `failed to create new symlink`)
 		}
 
 		// the directory where rl.linkName should be created must exist
-		_, err := os.Stat(linkDir)
+		_, err = os.Stat(linkDir)
 		if err != nil { // Assume err != nil means the directory doesn't exist
-			if err := os.MkdirAll(linkDir, 0755); err != nil {
+			err = os.MkdirAll(linkDir, 0755)
+			if err != nil {
 				return errors.Wrapf(err, `failed to create directory %s`, linkDir)
 			}
 		}
@@ -404,7 +357,7 @@ func (rl *RotateLogs) rotateNolock(filename string) error {
 // Close satisfies the io.Closer interface. You must
 // call this method if you performed any writes to
 // the object.
-func (rl *RotateLogs) Close() error {
+func (rl *Rotate) Close() error {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 

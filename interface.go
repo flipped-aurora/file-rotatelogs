@@ -30,27 +30,27 @@ type FileRotatedEvent struct {
 	current string // current, new filename
 }
 
-// RotateLogs represents a log file that gets
+// Rotate represents a log file that gets
 // automatically rotated as you write to it.
-type RotateLogs struct {
+type Rotate struct {
 	clock         Clock
 	curFn         string
 	curBaseFn     string
 	globPattern   string
 	generation    int
-	linkName      string
+	linkName      string // 软链接名称
 	maxAge        time.Duration
-	mutex         sync.RWMutex
-	eventHandler  Handler
-	outFh         *os.File
-	pattern       *strftime.Strftime
-	rotationTime  time.Duration
-	rotationSize  int64
-	rotationCount uint
-	forceNewFile  bool
+	mutex         *sync.RWMutex      // 读写锁
+	eventHandler  Handler            // 事件处理
+	outFh         *os.File           // 文件句柄
+	pattern       *strftime.Strftime // 时间格式
+	rotationTime  time.Duration      // 旋转时间
+	rotationSize  int64              // 旋转大小
+	rotationCount uint               // 旋转次数
+	forceNewFile  bool               // 强制新文件
 }
 
-// Clock is the interface used by the RotateLogs
+// Clock is the interface used by the Rotate
 // object to determine the current time
 type Clock interface {
 	Now() time.Time
@@ -64,10 +64,3 @@ var UTC = clockFn(func() time.Time { return time.Now().UTC() })
 // Local is an object satisfying the Clock interface, which
 // returns the current time in the local timezone
 var Local = clockFn(time.Now)
-
-// Option is used to pass optional arguments to
-// the RotateLogs constructor
-type Option interface {
-	Name() string
-	Value() interface{}
-}

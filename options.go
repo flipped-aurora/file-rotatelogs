@@ -2,9 +2,11 @@ package rotatelogs
 
 import (
 	"time"
-
-	"github.com/flipped-aurora/file-rotatelogs/internal/option"
 )
+
+// Option is used to pass optional arguments to
+// the Rotate constructor
+type Option func(*Rotate)
 
 const (
 	optkeyClock         = "clock"
@@ -18,7 +20,7 @@ const (
 )
 
 // WithClock creates a new Option that sets a clock
-// that the RotateLogs object will use to determine
+// that the Rotate object will use to determine
 // the current time.
 //
 // By default rotatelogs.Local, which returns the
@@ -26,64 +28,82 @@ const (
 // would rather use UTC, use rotatelogs.UTC as the argument
 // to this option, and pass it to the constructor.
 func WithClock(c Clock) Option {
-	return option.New(optkeyClock, c)
+	return func(rotate *Rotate) {
+		rotate.clock = c
+	}
 }
 
 // WithLocation creates a new Option that sets up a
-// "Clock" interface that the RotateLogs object will use
+// "Clock" interface that the Rotate object will use
 // to determine the current time.
 //
 // This optin works by always returning the in the given
 // location.
-func WithLocation(loc *time.Location) Option {
-	return option.New(optkeyClock, clockFn(func() time.Time {
-		return time.Now().In(loc)
-	}))
+func WithLocation(location *time.Location) Option {
+	return func(rotate *Rotate) {
+		rotate.clock = clockFn(func() time.Time {
+			return time.Now().In(location)
+		})
+	}
 }
 
 // WithLinkName creates a new Option that sets the
 // symbolic link name that gets linked to the current
 // file name being used.
-func WithLinkName(s string) Option {
-	return option.New(optkeyLinkName, s)
+func WithLinkName(name string) Option {
+	return func(rotate *Rotate) {
+		rotate.linkName = name
+	}
 }
 
 // WithMaxAge creates a new Option that sets the
 // max age of a log file before it gets purged from
 // the file system.
-func WithMaxAge(d time.Duration) Option {
-	return option.New(optkeyMaxAge, d)
+func WithMaxAge(age time.Duration) Option {
+	return func(rotate *Rotate) {
+		rotate.maxAge = age
+	}
 }
 
 // WithRotationTime creates a new Option that sets the
 // time between rotation.
-func WithRotationTime(d time.Duration) Option {
-	return option.New(optkeyRotationTime, d)
+func WithRotationTime(time time.Duration) Option {
+	return func(rotate *Rotate) {
+		rotate.rotationTime = time
+	}
 }
 
 // WithRotationSize creates a new Option that sets the
 // log file size between rotation.
-func WithRotationSize(s int64) Option {
-	return option.New(optkeyRotationSize, s)
+func WithRotationSize(size int64) Option {
+	return func(rotate *Rotate) {
+		rotate.rotationSize = size
+	}
 }
 
 // WithRotationCount creates a new Option that sets the
 // number of files should be kept before it gets
 // purged from the file system.
-func WithRotationCount(n uint) Option {
-	return option.New(optkeyRotationCount, n)
+func WithRotationCount(count uint) Option {
+	return func(rotate *Rotate) {
+		rotate.rotationCount = count
+	}
 }
 
 // WithHandler creates a new Option that specifies the
 // Handler object that gets invoked when an event occurs.
 // Currently `FileRotated` event is supported
 func WithHandler(h Handler) Option {
-	return option.New(optkeyHandler, h)
+	return func(rotate *Rotate) {
+		rotate.eventHandler = h
+	}
 }
 
 // ForceNewFile ensures a new file is created every time New()
 // is called. If the base file name already exists, an implicit
 // rotation is performed
 func ForceNewFile() Option {
-	return option.New(optkeyForceNewFile, true)
+	return func(rotate *Rotate) {
+		rotate.forceNewFile = true
+	}
 }

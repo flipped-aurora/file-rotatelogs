@@ -33,7 +33,7 @@ func TestLogRotate(t *testing.T) {
 	testCases := []struct {
 		Name        string
 		FixArgs     func([]rotatelogs.Option, string) []rotatelogs.Option
-		CheckExtras func(*testing.T, *rotatelogs.RotateLogs, string) bool
+		CheckExtras func(*testing.T, *rotatelogs.Rotate, string) bool
 	}{
 		{
 			Name: "Basic Usage",
@@ -45,7 +45,7 @@ func TestLogRotate(t *testing.T) {
 
 				return append(options, rotatelogs.WithLinkName(linkName))
 			},
-			CheckExtras: func(t *testing.T, rl *rotatelogs.RotateLogs, dir string) bool {
+			CheckExtras: func(t *testing.T, rl *rotatelogs.Rotate, dir string) bool {
 				linkName := filepath.Join(dir, "log")
 				linkDest, err := os.Readlink(linkName)
 				if !assert.NoError(t, err, `os.Readlink(%#v) should succeed`, linkName) {
@@ -65,7 +65,7 @@ func TestLogRotate(t *testing.T) {
 
 				return append(options, rotatelogs.WithLinkName(linkName))
 			},
-			CheckExtras: func(t *testing.T, rl *rotatelogs.RotateLogs, dir string) bool {
+			CheckExtras: func(t *testing.T, rl *rotatelogs.Rotate, dir string) bool {
 				linkName := filepath.Join(dir, "nest1", "nest2", "log")
 				linkDest, err := os.Readlink(linkName)
 				if !assert.NoError(t, err, `os.Readlink(%#v) should succeed`, linkName) {
