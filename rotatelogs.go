@@ -1,26 +1,26 @@
-// package rotatelogs is a port of File-Rotate from Perl
-// (https://metacpan.org/release/File-RotateLogs), and it allows
-// you to automatically rotate output files when you write to them
-// according to the filename pattern that you can specify.
 package rotatelogs
 
 import (
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/flipped-aurora/file-rotatelogs/internal/fileutil"
-	strftime "github.com/lestrrat-go/strftime"
-	"github.com/pkg/errors"
+	"github.com/lestrrat-go/strftime"
 )
 
-func (c clockFn) Now() time.Time {
-	return c()
+// Rotate represents a log file that gets
+// automatically rotated as you write to it.
+type Rotate struct {
+	filename     string             // 当前文件名称
+	clock        Clock              // 时间
+	out          *os.File           // 文件句柄
+	mutex        *sync.RWMutex      // 读写锁
+	maxAge       time.Duration      // 最大保存时间
+	pattern      *strftime.Strftime // 时间格式
+	rotationTime time.Duration      // 旋转时间
 }
 
 // New creates a new Rotate object. A log filename pattern
@@ -28,7 +28,7 @@ func (c clockFn) Now() time.Time {
 func New(p string, options ...Option) (*Rotate, error) {
 	pattern, err := strftime.New(p)
 	if err != nil {
-		return nil, errors.Wrap(err, `invalid strftime pattern`)
+		return nil, err
 	}
 	rotate := &Rotate{
 		clock:        Local,
@@ -39,15 +39,6 @@ func New(p string, options ...Option) (*Rotate, error) {
 	for i := 0; i < len(options); i++ {
 		options[i](rotate)
 	}
-	for i := 0; i < len(patternConversionRegexps); i++ {
-		rotate.globPattern = patternConversionRegexps[i].ReplaceAllString(rotate.globPattern, "*")
-	}
-	if rotate.maxAge > 0 && rotate.rotationCount > 0 {
-		return nil, errors.New("options MaxAge and RotationCount cannot be both set")
-	}
-	if rotate.maxAge == 0 && rotate.rotationCount == 0 {
-		rotate.maxAge = 7 * 24 * time.Hour
-	} // if both are 0, give maxAge a sane default
 	return rotate, nil
 }
 
@@ -55,318 +46,96 @@ func New(p string, options ...Option) (*Rotate, error) {
 // appropriate file handle that is currently being used.
 // If we have reached rotation time, the target file gets
 // automatically rotated, and also purged if necessary.
-func (rl *Rotate) Write(bytes []byte) (n int, err error) {
-	// Guard against concurrent writes
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+func (r *Rotate) Write(bytes []byte) (n int, err error) {
+	r.mutex.Lock() // Guard against concurrent writes
+	defer r.mutex.Unlock()
 	var out io.Writer
 	if strings.Contains(string(bytes), "business") {
-		compile := regexp.MustCompile(`{"business": "([^,]+)"}`)
-		business := compile.FindStringSubmatch(string(bytes))
-		if len(business) == 2 {
-			data := string(bytes)
-			data = compile.ReplaceAllString(data, "")
-			out, err = rl.getWriterNolock(false, false, business[1])
+		var compile *regexp.Regexp
+		compile, err = regexp.Compile(`{"business": "([^,]+)"}`)
+		if err != nil {
+			return 0, err
+		}
+		if compile.Match(bytes) {
+			finds := compile.FindSubmatch(bytes)
+			business := string(finds[len(finds)-1])
+			bytes = compile.ReplaceAll(bytes, []byte(""))
+			out, err = r.getBusinessWriter(business)
 			if err != nil {
 				return 0, err
 			}
-			return out.Write([]byte(data))
-		} else {
-			compile = regexp.MustCompile(`"business": "([^,]+)"`)
-			business = compile.FindStringSubmatch(string(bytes))
-			if len(business) == 2 {
-				data := string(bytes)
-				data = compile.ReplaceAllString(data, "")
-				out, err = rl.getWriterNolock(false, false, business[1])
-				if err != nil {
-					return 0, err
-				}
-				return out.Write([]byte(data))
+			return out.Write(bytes)
+		}
+		compile, err = regexp.Compile(`"business": "([^,]+)"`)
+		if err != nil {
+			return 0, err
+		}
+		if compile.Match(bytes) {
+			finds := compile.FindSubmatch(bytes)
+			business := string(finds[len(finds)-1])
+			bytes = compile.ReplaceAll(bytes, []byte(""))
+			out, err = r.getBusinessWriter(business)
+			if err != nil {
+				return 0, err
 			}
+			return out.Write(bytes)
 		}
 	}
-
-	out, err = rl.getWriterNolock(false, false, "")
+	out, err = r.getWriter()
 	if err != nil {
-		return 0, errors.Wrap(err, `failed to acquite target io.Writer`)
+		return 0, err
 	}
-
 	return out.Write(bytes)
 }
 
-// must be locked during this operation
-func (rl *Rotate) getWriterNolock(bailOnRotateFail, useGenerationalNames bool, business string) (io.Writer, error) {
+// getBusinessWriter 获取 business io.Writer
+func (r *Rotate) getBusinessWriter(business string) (io.Writer, error) {
+	var pattern *strftime.Strftime
 	if business != "" {
-		slice := strings.Split(rl.pattern.Pattern(), "/")
+		slice := strings.Split(r.pattern.Pattern(), "/")
 		if slice[len(slice)-2] != business {
 			slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
-			rl.pattern, _ = strftime.New(strings.Join(slice, "/"))
+			pattern, _ = strftime.New(strings.Join(slice, "/"))
 		}
 	}
-	generation := rl.generation
-	previousFn := rl.curFn
-
-	// This filename contains the name of the "NEW" filename
-	// to log to, which may be newer than rl.currentFilename
-	baseFn := fileutil.GenerateFn(rl.pattern, rl.clock, rl.rotationTime)
-	filename := baseFn
-	var forceNewFile bool
-
-	fi, err := os.Stat(rl.curFn)
-	sizeRotation := false
-	if err == nil && rl.rotationSize > 0 && rl.rotationSize <= fi.Size() {
-		forceNewFile = true
-		sizeRotation = true
-	}
-
-	if baseFn != rl.curBaseFn {
-		generation = 0
-		// even though this is the first write after calling New(),
-		// check if a new file needs to be created
-		if rl.forceNewFile {
-			forceNewFile = true
-		}
-	} else {
-		if !useGenerationalNames && !sizeRotation {
-			// nothing to do
-			return rl.outFh, nil
-		}
-		forceNewFile = true
-		generation++
-	}
-	if forceNewFile {
-		// A new file has been requested. Instead of just using the
-		// regular strftime pattern, we create a new file name using
-		// generational names such as "foo.1", "foo.2", "foo.3", etc
-		var name string
-		for {
-			if generation == 0 {
-				name = filename
-			} else {
-				name = fmt.Sprintf("%s.%d", filename, generation)
-			}
-			if _, err := os.Stat(name); err != nil {
-				filename = name
-
-				break
-			}
-			generation++
-		}
-	}
-
-	fh, err := fileutil.CreateFile(filename)
+	filename := GenerateFile(pattern, r.clock, r.rotationTime)
+	out, err := CreateFile(filename)
 	if err != nil {
-		return nil, errors.Wrapf(err, `failed to create a new file %v`, filename)
+		return nil, err
 	}
-
-	if err := rl.rotateNolock(filename); err != nil {
-		err = errors.Wrap(err, "failed to rotate")
-		if bailOnRotateFail {
-			// Failure to rotate is a problem, but it's really not a great
-			// idea to stop your application just because you couldn't rename
-			// your log.
-			//
-			// We only return this error when explicitly needed (as specified by bailOnRotateFail)
-			//
-			// However, we *NEED* to close `fh` here
-			if fh != nil { // probably can't happen, but being paranoid
-				fh.Close()
-			}
-
-			return nil, err
-		}
-		fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-	}
-
-	rl.outFh.Close()
-	rl.outFh = fh
-	rl.curBaseFn = baseFn
-	rl.curFn = filename
-	rl.generation = generation
-
-	if h := rl.eventHandler; h != nil {
-		go h.Handle(&FileRotatedEvent{
-			prev:    previousFn,
-			current: filename,
-		})
-	}
-
-	return fh, nil
+	return out, nil
 }
 
-// CurrentFileName returns the current file name that
-// the Rotate object is writing to
-func (rl *Rotate) CurrentFileName() string {
-	rl.mutex.RLock()
-	defer rl.mutex.RUnlock()
-	return rl.curFn
-}
-
-var patternConversionRegexps = []*regexp.Regexp{
-	regexp.MustCompile(`%[%+A-Za-z]`),
-	regexp.MustCompile(`\*+`),
-}
-
-type cleanupGuard struct {
-	enable bool
-	fn     func()
-	mutex  sync.Mutex
-}
-
-func (g *cleanupGuard) Enable() {
-	g.mutex.Lock()
-	defer g.mutex.Unlock()
-	g.enable = true
-}
-
-func (g *cleanupGuard) Run() {
-	g.fn()
-}
-
-// Rotate forcefully rotates the log files. If the generated file name
-// clash because file already exists, a numeric suffix of the form
-// ".1", ".2", ".3" and so forth are appended to the end of the log file
-//
-// Thie method can be used in conjunction with a signal handler so to
-// emulate servers that generate new log files when they receive a
-// SIGHUP
-func (rl *Rotate) Rotate() error {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-	_, err := rl.getWriterNolock(true, true, "")
-	return err
-}
-
-func (rl *Rotate) rotateNolock(filename string) error {
-	lock := filename + `_lock`
-	fh, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL, 0644)
+// getWriter 获取 io.Writer
+func (r *Rotate) getWriter() (io.Writer, error) {
+	filename := GenerateFile(r.pattern, r.clock, r.rotationTime)
+	out, err := CreateFile(filename)
 	if err != nil {
-		// Can't lock, just return
-		return err
+		return nil, err
 	}
-
-	var guard cleanupGuard
-	guard.fn = func() {
-		_ = fh.Close()
-		_ = os.Remove(lock)
-	}
-	defer guard.Run()
-
-	if rl.linkName != "" {
-		tmpLinkName := filename + `_symlink`
-
-		// Change how the link name is generated based on where the
-		// target location is. if the location is directly underneath
-		// the main filename's parent directory, then we create a
-		// symlink with a relative path
-		linkDest := filename
-		linkDir := filepath.Dir(rl.linkName)
-
-		baseDir := filepath.Dir(filename)
-		if strings.Contains(rl.linkName, baseDir) {
-			tmp, err := filepath.Rel(linkDir, filename)
-			if err != nil {
-				return errors.Wrapf(err, `failed to evaluate relative path from %#v to %#v`, baseDir, rl.linkName)
-			}
-
-			linkDest = tmp
-		}
-
-		err = os.Symlink(linkDest, tmpLinkName)
-		if err != nil {
-			return errors.Wrap(err, `failed to create new symlink`)
-		}
-
-		// the directory where rl.linkName should be created must exist
-		_, err = os.Stat(linkDir)
-		if err != nil { // Assume err != nil means the directory doesn't exist
-			err = os.MkdirAll(linkDir, 0755)
-			if err != nil {
-				return errors.Wrapf(err, `failed to create directory %s`, linkDir)
-			}
-		}
-
-		if err := os.Rename(tmpLinkName, rl.linkName); err != nil {
-			return errors.Wrap(err, `failed to rename new symlink`)
-		}
-	}
-
-	if rl.maxAge <= 0 && rl.rotationCount <= 0 {
-		return errors.New("panic: maxAge and rotationCount are both set")
-	}
-
-	matches, err := filepath.Glob(rl.globPattern)
+	err = r.out.Close()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	cutoff := rl.clock.Now().Add(-1 * rl.maxAge)
-
-	// the linter tells me to pre allocate this...
-	toUnlink := make([]string, 0, len(matches))
-	for _, path := range matches {
-		// Ignore lock files
-		if strings.HasSuffix(path, "_lock") || strings.HasSuffix(path, "_symlink") {
-			continue
-		}
-
-		fi, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-
-		fl, err := os.Lstat(path)
-		if err != nil {
-			continue
-		}
-
-		if rl.maxAge > 0 && fi.ModTime().After(cutoff) {
-			continue
-		}
-
-		if rl.rotationCount > 0 && fl.Mode()&os.ModeSymlink == os.ModeSymlink {
-			continue
-		}
-		toUnlink = append(toUnlink, path)
-	}
-
-	if rl.rotationCount > 0 {
-		// Only delete if we have more than rotationCount
-		if rl.rotationCount >= uint(len(toUnlink)) {
-			return nil
-		}
-
-		toUnlink = toUnlink[:len(toUnlink)-int(rl.rotationCount)]
-	}
-
-	if len(toUnlink) <= 0 {
-		return nil
-	}
-
-	guard.Enable()
-	go func() {
-		// unlink files on a separate goroutine
-		for _, path := range toUnlink {
-			os.Remove(path)
-		}
-	}()
-
-	return nil
+	r.out = out
+	r.filename = filename
+	return out, nil
 }
 
 // Close satisfies the io.Closer interface. You must
 // call this method if you performed any writes to
 // the object.
-func (rl *Rotate) Close() error {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+func (r *Rotate) Close() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	if rl.outFh == nil {
+	if r.out == nil {
 		return nil
 	}
-
-	rl.outFh.Close()
-	rl.outFh = nil
-
+	err := r.out.Close()
+	if err != nil {
+		return err
+	}
+	r.out = nil
 	return nil
 }

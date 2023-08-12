@@ -1,10 +1,10 @@
 module github.com/flipped-aurora/file-rotatelogs
 
-go 1.12
+go 1.19
+
+require github.com/lestrrat-go/strftime v1.0.6
 
 require (
-	github.com/jonboulle/clockwork v0.4.0
-	github.com/lestrrat-go/strftime v1.0.6
-	github.com/pkg/errors v0.9.1
-	github.com/stretchr/testify v1.8.4
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/stretchr/testify v1.8.4 // indirect
 )
