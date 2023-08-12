@@ -91,12 +91,10 @@ func (r *Rotate) Write(bytes []byte) (n int, err error) {
 // getBusinessWriter 获取 business io.Writer
 func (r *Rotate) getBusinessWriter(business string) (io.Writer, error) {
 	var pattern *strftime.Strftime
-	if business != "" {
-		slice := strings.Split(r.pattern.Pattern(), "/")
-		if slice[len(slice)-2] != business {
-			slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
-			pattern, _ = strftime.New(strings.Join(slice, "/"))
-		}
+	slice := strings.Split(r.pattern.Pattern(), "/")
+	if slice[len(slice)-2] != business {
+		slice = append(slice[:len(slice)-1], business, slice[len(slice)-1])
+		pattern, _ = strftime.New(strings.Join(slice, "/"))
 	}
 	filename := GenerateFile(pattern, r.clock, r.rotationTime)
 	out, err := CreateFile(filename)
@@ -113,29 +111,8 @@ func (r *Rotate) getWriter() (io.Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = r.out.Close()
-	if err != nil {
-		return nil, err
-	}
+	_ = r.out.Close()
 	r.out = out
 	r.filename = filename
 	return out, nil
-}
-
-// Close satisfies the io.Closer interface. You must
-// call this method if you performed any writes to
-// the object.
-func (r *Rotate) Close() error {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	if r.out == nil {
-		return nil
-	}
-	err := r.out.Close()
-	if err != nil {
-		return err
-	}
-	r.out = nil
-	return nil
 }
