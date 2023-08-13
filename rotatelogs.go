@@ -14,9 +14,9 @@ import (
 // Rotate represents a log file that gets
 // automatically rotated as you write to it.
 type Rotate struct {
-	filename     string             // 当前文件名称
 	clock        Clock              // 时间
 	out          *os.File           // 文件句柄
+	business     *os.File           // 文件句柄
 	mutex        *sync.RWMutex      // 读写锁
 	maxAge       time.Duration      // 最大保存时间
 	pattern      *strftime.Strftime // 时间格式
@@ -48,7 +48,10 @@ func New(p string, options ...Option) (*Rotate, error) {
 // automatically rotated, and also purged if necessary.
 func (r *Rotate) Write(bytes []byte) (n int, err error) {
 	r.mutex.Lock() // Guard against concurrent writes
-	defer r.mutex.Unlock()
+	defer func() {
+		r.mutex.Unlock()
+		r.Close()
+	}()
 	var out io.Writer
 	if strings.Contains(string(bytes), "business") {
 		var compile *regexp.Regexp
@@ -101,6 +104,7 @@ func (r *Rotate) getBusinessWriter(business string) (io.Writer, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.business = out
 	return out, nil
 }
 
@@ -113,6 +117,18 @@ func (r *Rotate) getWriter() (io.Writer, error) {
 	}
 	_ = r.out.Close()
 	r.out = out
-	r.filename = filename
 	return out, nil
+}
+
+func (r *Rotate) Close() {
+	r.mutex.Lock() // Guard against concurrent writes
+	defer r.mutex.Unlock()
+	if r.out != nil {
+		_ = r.out.Close()
+		r.out = nil
+	}
+	if r.business != nil {
+		_ = r.business.Close()
+		r.business = nil
+	}
 }
